@@ -1,28 +1,34 @@
 /*
-** Copyright (C) 2009-2013 Mischa Sandberg <mischasan@gmail.com>
+** Copyright (C) 2009-2014 Mischa Sandberg <mischasan@gmail.com>
 **
 ** This program is free software; you can redistribute it and/or modify
-** it under the terms of the GNU General Public License Version 2 as
+** it under the terms of the GNU Lesser General Public License Version 3 as
 ** published by the Free Software Foundation.  You may not use, modify or
-** distribute this program under any other version of the GNU General
+** distribute this program under any other version of the GNU Lesser General
 ** Public License.
 **
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
+** GNU Lesser General Public License for more details.
 **
-** You should have received a copy of the GNU General Public License
+** You should have received a copy of the GNU Lesser General Public License
 ** along with this program; if not, write to the Free Software
 ** Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 #include "_acism.h"
 
+typedef enum { BASE=2, USED=1 } USES;
+
 typedef struct tnode {
     struct tnode *child, *next, *back;
-    union { unsigned nrefs; STATE state; } x;
-    STRNO match;
-    SYMBOL sym, is_suffix;
+    // nrefs was used in "prune_backlinks".
+    //  It will be used again in "curtail".
+    unsigned    nrefs;
+    STATE       state;
+    STRNO       match;
+    SYMBOL      sym;
+    char        is_suffix;      // "bool"
 } TNODE;
 
 //--------------|---------------------------------------------
@@ -37,22 +43,23 @@ static inline int bitwid(unsigned u)
     if (u & 0x00000002) ret++;
     return ret;
 }
-static void add_backlinks(TNODE*, TNODE**, TNODE**);
-static int create_tree(TNODE*, SYMBOL const*symv, MEMREF const*strv, int nstrs);
-static void fill_hashv(ACISM*, TNODE const*, int nn);
-static void fill_symv(ACISM*, MEMREF const*, int ns);
-static void fill_tranv(ACISM*, TNODE const*);
+
+static void   fill_symv(ACISM*, MEMREF const*, int ns);
+static int    create_tree(TNODE*, SYMBOL const*symv, MEMREF const*strv, int nstrs);
+static void   add_backlinks(TNODE*, TNODE**, TNODE**);
+static int    interleave(TNODE*, int nnodes, int nsyms, TNODE**, TNODE**);
+static void   fill_tranv(ACISM*, TNODE const*);
+static void   fill_hashv(ACISM*, TNODE const*, int nn);
+
 static TNODE* find_child(TNODE*, SYMBOL);
-static int interleave(TNODE*, int nnodes, int nsyms, TNODE**, TNODE**);
-static void prune_backlinks(TNODE*);
 
 // (ns) is either a STATE, or a (STRNO + tran_size)
 static inline void
 set_tran(ACISM *psp, STATE s, SYMBOL sym, int match, int suffix, TRAN ns)
 {
-    psp->tranv[s + sym] = sym   | (match ? IS_MATCH : 0) 
+    psp->tranv[s + sym] = sym    | (match ? IS_MATCH : 0) 
                                 | (suffix ? IS_SUFFIX : 0)
-                                | (ns << psp->sym_bits);
+                                | (ns << SYM_BITS);
 }
 
 // Track statistics for construction
@@ -70,7 +77,7 @@ extern PSSTAT psstat[];
 ACISM*
 acism_create(MEMREF const* strv, int nstrs)
 {
-    TNODE *tp, **v1 = NULL, **v2 = NULL;
+    TNODE **v1 = NULL, **v2 = NULL;
     ACISM *psp = calloc(1, sizeof*psp);
 
     fill_symv(psp, strv, nstrs);
@@ -79,18 +86,18 @@ acism_create(MEMREF const* strv, int nstrs)
     int nnodes = create_tree(troot, psp->symv, strv, nstrs);
     NOTE(nnodes);
 
-    // v1, v2: work vectors for add_backlink and interleave.
-    int nhash, i = (nstrs + 1) * sizeof*tp;
+    // v1, v2: breadth-first work vectors for add_backlink and interleave.
+    int i = (nstrs + 1) * sizeof(TNODE);
     add_backlinks(troot, v1 = malloc(i), v2 = malloc(i));
-
-    for (tp = troot + nnodes, nhash = 0; --tp > troot;) {
-        prune_backlinks(tp);
+    
+    int     nhash = 0;
+    TNODE*  tp = troot + nnodes;
+    while (--tp > troot)
         nhash += tp->match && tp->child;
-    }
-
+    
     // Calculate each node's offset in tranv[]:
     psp->tran_size = interleave(troot, nnodes, psp->nsyms, v1, v2);
-    if (bitwid(psp->tran_size + nstrs - 1) + psp->sym_bits > 30)
+    if (bitwid(psp->tran_size + nstrs - 1) + SYM_BITS > sizeof(TRAN)*8 - 2)
         goto FAIL;
 
     if (nhash) {
@@ -113,7 +120,7 @@ acism_create(MEMREF const* strv, int nstrs)
         // Adjust hash_size to include trailing overflows
         //  but trim trailing empty slots.
         psp->hash_size = psp->hash_mod;
-        while ( psp->hashv[psp->hash_size].state) ++psp->hash_size;
+        while ( psp->hashv[psp->hash_size].state)     ++psp->hash_size;
         while (!psp->hashv[psp->hash_size - 1].state) --psp->hash_size;
         set_tranv(psp, realloc(psp->tranv, p_size(psp)));
     }
@@ -147,9 +154,12 @@ fill_symv(ACISM *psp, MEMREF const *strv, int nstrs)
 
     for (i = 256; --i >= 0 && frv[i].freq;)
         psp->symv[frv[i].rank] = ++psp->nsyms;
+    ++psp->nsyms;
 
-    psp->sym_bits = bitwid(++psp->nsyms);
+#if ACISM_SIZE < 8
+    psp->sym_bits = bitwid(psp->nsyms);
     psp->sym_mask = ~(-1 << psp->sym_bits);
+#endif
 }
 
 static int
@@ -206,17 +216,30 @@ add_backlinks(TNODE *troot, TNODE **v1, TNODE **v2)
 
     while (*v1) {
         TNODE **spp = v1, **dpp = v2, *srcp, *dstp;
+
         while ((srcp = *spp++)) {
             for (dstp = srcp->child; dstp; dstp = dstp->next) {
                 TNODE *bp = NULL;
-                *dpp++ = dstp;
+                if (dstp->child)
+                    *dpp++ = dstp;
+
+                // Go through the parent (srcp) node's backlink chain,
+                //  looking for a useful backlink for the child (dstp).
+                // If the parent (srcp) has a backlink to (tp),
+                //  and (tp) has a child matching the transition sym 
+                //  for (srcp -> dstp), then it is a useful backlink 
+                //  for the child (dstp).
+                // Note that backlinks do not point at the suffix match;
+                //  they point at the PARENT of that match.
+
                 for (tp = srcp->back; tp; tp = tp->back)
-                   if ((bp = find_child(tp, dstp->sym))) break;
+                    if ((bp = find_child(tp, dstp->sym)))
+                        break;
                 if (!bp)
                     bp = troot;
 
                 dstp->back = dstp->child ? bp : tp ? tp : troot;
-                dstp->back->x.nrefs++;
+                dstp->back->nrefs++;
                 dstp->is_suffix = bp->match || bp->is_suffix;
             }
         }
@@ -225,46 +248,12 @@ add_backlinks(TNODE *troot, TNODE **v1, TNODE **v2)
     }
 }
 
-static void
-prune_backlinks(TNODE *tp)
-{
-    if (tp->x.nrefs || !tp->child)
-        return;
-
-    TNODE *bp;
-        // (bp != bp->back IFF bp != troot)
-    while ((bp = tp->back) && !bp->match && bp != bp->back) {
-        HIT("backlinks");
-        TNODE *cp = tp->child, *pp = bp->child;
-
-        // Search for a child of bp that's not a child of tp
-        for (; cp && pp && pp->sym >= cp->sym; cp = cp->next) {
-            if (pp->sym == cp->sym) {
-                if (pp->match && cp->is_suffix) break;
-                pp = pp->next;
-            }
-        }
-
-        if (pp) break;
-
-        // So, target of back link is not a suffix match
-        // of this node, and its children are a subset
-        // of this node's children: prune it.
-        HIT("pruned");
-        if ((tp->back = bp->back)) {
-            tp->back->x.nrefs++;
-            if (!--bp->x.nrefs)
-                prune_backlinks(bp);
-        }
-    }
-}
-
 static int
 interleave(TNODE *troot, int nnodes, int nsyms, TNODE **v1, TNODE **v2)
 {
     unsigned usev_size = nnodes + nsyms;
     char *usev = calloc(usev_size, sizeof*usev);
-    STATE last_trans = 0, startv[nsyms][2];
+    STATE last_trans = 0, startv[257][2] = { 0 };
     TNODE *cp, **tmp;
 
     memset(startv, 0, nsyms * sizeof*startv);
@@ -305,7 +294,7 @@ interleave(TNODE *troot, int nnodes, int nsyms, TNODE **v1, TNODE **v2)
                 // No child needs an in-use slot? We're done.
                 if (!cp) break;
             }
-            tp->x.state = pos;
+            tp->state = pos;
 
             // Mark node's base and children as used:
             usev[pos] |= need;
@@ -342,7 +331,7 @@ fill_hashv(ACISM *psp, TNODE const treev[], int nnodes)
 
     // First pass: insert without resolving collisions.
     for (i = 0; i < nnodes; ++i) {
-        STATE base = treev[i].x.state;
+        STATE base = treev[i].state;
         TNODE const *tp;
         for (tp = treev[i].child; tp; tp = tp->next) {
             if (tp->match && tp->child) {
@@ -369,12 +358,12 @@ fill_tranv(ACISM *psp, TNODE const*tp)
     TNODE const *cp = tp->child;
 
     if (cp && tp->back)
-            set_tran(psp, tp->x.state, 0, 0, 0, tp->back->x.state);
+            set_tran(psp, tp->state, 0, 0, 0, tp->back->state);
 
     for (; cp; cp = cp->next) {
         //NOTE: cp->match is (strno+1) so that !cp->match means "no match".
-        set_tran(psp, tp->x.state, cp->sym, cp->match, cp->is_suffix,
-                   cp->child ? cp->x.state : cp->match - 1 + psp->tran_size);
+        set_tran(psp, tp->state, cp->sym, cp->match, cp->is_suffix,
+                   cp->child ? cp->state : cp->match - 1 + psp->tran_size);
         if (cp->child)
             fill_tranv(psp, cp);
     }

@@ -1,18 +1,18 @@
 /*
-** Copyright (C) 2009-2013 Mischa Sandberg <mischasan@gmail.com>
+** Copyright (C) 2009-2014 Mischa Sandberg <mischasan@gmail.com>
 **
 ** This program is free software; you can redistribute it and/or modify
-** it under the terms of the GNU General Public License Version 2 as
+** it under the terms of the GNU Lesser General Public License Version 3 as
 ** published by the Free Software Foundation.  You may not use, modify or
-** distribute this program under any other version of the GNU General
+** distribute this program under any other version of the GNU Lesser General
 ** Public License.
 **
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
+** GNU Lesser General Public License for more details.
 **
-** You should have received a copy of the GNU General Public License
+** You should have received a copy of the GNU Lesser General Public License
 ** along with this program; if not, write to the Free Software
 ** Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
@@ -21,8 +21,10 @@
 #include "_acism.h"
 #include <assert.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <sys/mman.h>
+#if !defined(_MSC_VER)
+#   include <unistd.h>
+#	include <sys/mman.h>
+#endif
 
 #ifndef MAP_NOCORE
 # define MAP_NOCORE 0
@@ -56,10 +58,12 @@ acism_load(FILE *fp)
     return NULL;
 }
 
+#if !defined(_MSC_VER)
+//XXX add mmap for VS
 ACISM*
 acism_mmap(FILE *fp)
 {
-    char *mp = mmap(0, lseek(fileno(fp), 0L, 2), PROT_READ,
+    ACISM *mp = mmap(0, lseek(fileno(fp), 0L, 2), PROT_READ,
                     MAP_SHARED|MAP_NOCORE, fileno(fp), 0);
     if (mp == MAP_FAILED) return NULL;
 
@@ -71,18 +75,21 @@ acism_mmap(FILE *fp)
         return NULL;
     }
 
-    set_tranv(psp, mp + sizeof(ACISM));
+    set_tranv(psp, ((char *)mp) + sizeof(ACISM));
     return psp;
 }
+#endif//_MSC_VER
 
 void
 acism_destroy(ACISM *psp)
 {
     if (!psp) return;
+#ifdef XXX
     if (psp->flags & IS_MMAP)
-        munmap((char*)psp->tranv - sizeof(ACISM),
-               sizeof(ACISM) + p_size(psp));
-    else free(psp->tranv);
+        munmap((char*)psp->tranv - sizeof(ACISM), sizeof(ACISM) + p_size(psp));
+    else
+#endif//XXX
+        free(psp->tranv);
     free(psp);
 }
 //EOF

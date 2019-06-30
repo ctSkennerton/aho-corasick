@@ -1,35 +1,20 @@
--include rules.mk
-export acism ?= .
+~ := acism
+include $(word 1, ${RULES} rules.mk)
 
 #---------------- PRIVATE VARS:
-# acism.pgms: test programs requiring no args
+acism.x         = acism_x acism_mmap_x
 
-acism.c          = $(patsubst %,$(acism)/%, acism.c acism_create.c acism_dump.c acism_file.c)
-acism.pgms       = $(acism)/acism_x $(acism)/acism_mmap_x
-
-#---------------- PUBLIC VARS:
-acism.lib       = $(acism)/libacism.a
-acism.include   = $(acism)/acism.h
-
-#---------------- PUBLIC TARGETS (see rules.mk):
-all             : $(acism.lib)
-test            : $(acism)/acism_t.pass
-
-# Activate default actions for (clean,install):
-acism.clean 	= $(acism)/*.tmp
-install .PHONY  : acism.install
+#---------------- PUBLIC (see rules.mk):
+all             : libacism.a
+test            : acism_t.pass
+install         : libacism.a  acism.h
+clean           += *.tmp
 
 #---------------- PRIVATE RULES:
-$(acism.lib)	: $(acism.c:c=o)
+libacism.a      : acism.o  acism_create.o  acism_dump.o  acism_file.o
+acism_t.pass    : ${acism.x}  words
+${acism.x}      : libacism.a  msutil.o  tap.o
 
-$(acism)/acism_t.pass : $(acism.pgms) $(acism)/words
-
-$(acism.pgms)   : CPPFLAGS := -I$(acism) $(CPPFLAGS)
-$(acism.pgms)   : $(acism.lib) $(acism)/msutil.o $(acism)/tap.o
-
-$(acism.c:c=i) 	: CPPFLAGS += -I$(acism)
-
-# Include auto-generated depfiles (gcc -MMD):
--include $(acism)/*.d
+#_CFLAGS = -DACISM_SIZE=8
 
 # vim: set nowrap :
